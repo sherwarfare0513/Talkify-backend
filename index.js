@@ -1,15 +1,20 @@
 /* global process */
 import http from 'node:http'
+import crypto from 'node:crypto'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
-const dbPath = path.join(__dirname, 'data', 'db.json')
 loadEnvFile(path.join(path.dirname(__dirname), '.env'))
 const port = Number(process.env.PORT || 3001)
 const appName = process.env.APP_NAME || 'ConnectArena'
+const isVercel = process.env.VERCEL === '1'
+const dbPath = process.env.DB_PATH || (isVercel
+  ? path.join(os.tmpdir(), 'talkify-db.json')
+  : path.join(__dirname, 'data', 'db.json'))
 
 const defaultDb = {
   users: [],
@@ -59,12 +64,35 @@ function writeDb(db) {
   fs.writeFileSync(dbPath, JSON.stringify(db, null, 2))
 }
 
-function sendJson(res, statusCode, body) {
+function getAllowedOrigins() {
+  return (process.env.CORS_ORIGIN ||
+    'https://incandescent-unicorn-bb3930.netlify.app,http://localhost:5173,http://127.0.0.1:5173')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean)
+}
+
+function resolveCorsOrigin(req) {
+  const requestOrigin = req.headers.origin
+  const allowedOrigins = getAllowedOrigins()
+
+  if (!requestOrigin) {
+    return allowedOrigins[0] || '*'
+  }
+  if (allowedOrigins.includes('*') || allowedOrigins.includes(requestOrigin)) {
+    return requestOrigin
+  }
+
+  return allowedOrigins[0] || '*'
+}
+
+function sendJson(req, res, statusCode, body) {
   res.writeHead(statusCode, {
     'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Origin': resolveCorsOrigin(req),
     'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    Vary: 'Origin',
   })
   res.end(JSON.stringify(body))
 }
@@ -197,9 +225,13 @@ function sanitizeState(db) {
   }
 }
 
-const server = http.createServer(async (req, res) => {
+function matchesPath(pathname, ...candidates) {
+  return candidates.includes(pathname)
+}
+
+async function handleRequest(req, res) {
   if (req.method === 'OPTIONS') {
-    sendJson(res, 204, {})
+    sendJson(req, res, 204, {})
     return
   }
 
@@ -207,12 +239,30 @@ const server = http.createServer(async (req, res) => {
   const db = readDb()
 
   try {
-    if (req.method === 'GET' && url.pathname === '/api/state') {
-      sendJson(res, 200, sanitizeState(db))
+    if (req.method === 'GET' && url.pathname === '/') {
+      sendJson(req, res, 200, {
+        name: appName,
+        status: 'ok',
+        message: 'Talkify backend is running.',
+      })
       return
     }
 
-    if (req.method === 'POST' && url.pathname === '/api/auth/signup') {
+    if (req.method === 'GET' && url.pathname === '/api/health') {
+      sendJson(req, res, 200, {
+        status: 'ok',
+        storage: dbPath,
+        vercel: isVercel,
+      })
+      return
+    }
+
+    if (req.method === 'GET' && matchesPath(url.pathname, '/api/state', '/state')) {
+      sendJson(req, res, 200, sanitizeState(db))
+      return
+    }
+
+    if (req.method === 'POST' && matchesPath(url.pathname, '/api/auth/signup', '/signup')) {
       const body = await parseBody(req)
       const firstName = body.firstName?.trim()
       const lastName = body.lastName?.trim()
@@ -224,51 +274,51 @@ const server = http.createServer(async (req, res) => {
       const gender = body.gender?.trim()
 
       if (!firstName || !lastName || !username || !password || !email || !phone || !dob || !gender) {
-        sendJson(res, 400, { error: 'First name, last name, username, email, phone, date of birth, gender, aur password required hain.' })
+        sendJson(req, res, 400, { error: 'First name, last name, username, email, phone, date of birth, gender, aur password required hain.' })
         return
       }
       if (!isValidName(firstName) || !isValidName(lastName)) {
-        sendJson(res, 400, { error: 'First name aur last name mein sirf valid letters hone chahiye.' })
+        sendJson(req, res, 400, { error: 'First name aur last name mein sirf valid letters hone chahiye.' })
         return
       }
       if (!isEmail(email)) {
-        sendJson(res, 400, { error: 'Valid email dena hoga.' })
+        sendJson(req, res, 400, { error: 'Valid email dena hoga.' })
         return
       }
       if (!isPhone(phone)) {
-        sendJson(res, 400, { error: 'Valid phone number dena hoga.' })
+        sendJson(req, res, 400, { error: 'Valid phone number dena hoga.' })
         return
       }
       if (!isAdultDob(dob)) {
-        sendJson(res, 400, { error: 'Sirf 18 saal ya us se zyada age wale users signup kar sakte hain.' })
+        sendJson(req, res, 400, { error: 'Sirf 18 saal ya us se zyada age wale users signup kar sakte hain.' })
         return
       }
       if (!['male', 'female', 'non-binary'].includes(gender)) {
-        sendJson(res, 400, { error: 'Valid gender select karna hoga.' })
+        sendJson(req, res, 400, { error: 'Valid gender select karna hoga.' })
         return
       }
       if (!isValidUsername(username)) {
-        sendJson(res, 400, { error: 'Username lowercase ho aur sirf letters, numbers, dot, ya underscore use kare.' })
+        sendJson(req, res, 400, { error: 'Username lowercase ho aur sirf letters, numbers, dot, ya underscore use kare.' })
         return
       }
       if (!isStrongPassword(password)) {
-        sendJson(res, 400, { error: 'Password kam az kam 8 characters ka ho, pehla letter uppercase ho, aur usme number aur special character bhi ho.' })
+        sendJson(req, res, 400, { error: 'Password kam az kam 8 characters ka ho, pehla letter uppercase ho, aur usme number aur special character bhi ho.' })
         return
       }
       if (!body.agreed) {
-        sendJson(res, 400, { error: 'Terms agreement is required.' })
+        sendJson(req, res, 400, { error: 'Terms agreement is required.' })
         return
       }
       if (db.users.some((user) => user.username === username)) {
-        sendJson(res, 409, { error: 'Username already exists.' })
+        sendJson(req, res, 409, { error: 'Username already exists.' })
         return
       }
       if (db.users.some((user) => (user.email || '').toLowerCase() === email)) {
-        sendJson(res, 409, { error: 'Email already registered hai.' })
+        sendJson(req, res, 409, { error: 'Email already registered hai.' })
         return
       }
       if (db.users.some((user) => (user.phone || user.identifier || '') === phone)) {
-        sendJson(res, 409, { error: 'Phone number already registered hai.' })
+        sendJson(req, res, 409, { error: 'Phone number already registered hai.' })
         return
       }
 
@@ -298,52 +348,56 @@ const server = http.createServer(async (req, res) => {
         createdAt: new Date().toISOString(),
       })
       writeDb(db)
-      sendJson(res, 200, { userId: user.id, state: sanitizeState(db) })
+      sendJson(req, res, 200, { userId: user.id, state: sanitizeState(db) })
       return
     }
 
-    if (req.method === 'POST' && url.pathname === '/api/auth/login') {
+    if (req.method === 'POST' && matchesPath(url.pathname, '/api/auth/login', '/login')) {
       const body = await parseBody(req)
-      const phone = body.phone?.trim()
+      const identifier = body.phone?.trim() || body.email?.trim()?.toLowerCase()
       const user = db.users.find(
         (item) =>
-          (item.phone || item.identifier || '') === phone && item.password === body.password,
+          (
+            (item.phone || item.identifier || '') === identifier ||
+            (item.email || '').toLowerCase() === identifier
+          ) &&
+          item.password === body.password,
       )
       if (!user) {
-        sendJson(res, 401, { error: 'Phone number ya password sahi nahin hai.' })
+        sendJson(req, res, 401, { error: 'Phone number, email, ya password sahi nahin hai.' })
         return
       }
       user.online = true
       writeDb(db)
-      sendJson(res, 200, { userId: user.id, state: sanitizeState(db) })
+      sendJson(req, res, 200, { userId: user.id, state: sanitizeState(db) })
       return
     }
 
-    if (req.method === 'POST' && url.pathname === '/api/logout') {
+    if (req.method === 'POST' && matchesPath(url.pathname, '/api/logout', '/logout')) {
       const body = await parseBody(req)
       const user = db.users.find((item) => item.id === body.userId)
       if (user) {
         user.online = false
         writeDb(db)
       }
-      sendJson(res, 200, { state: sanitizeState(db) })
+      sendJson(req, res, 200, { state: sanitizeState(db) })
       return
     }
 
-    if (req.method === 'POST' && url.pathname === '/api/presence') {
+    if (req.method === 'POST' && matchesPath(url.pathname, '/api/presence', '/presence')) {
       const body = await parseBody(req)
       const user = db.users.find((item) => item.id === body.userId)
       if (!user) {
-        sendJson(res, 404, { error: 'User not found.' })
+        sendJson(req, res, 404, { error: 'User not found.' })
         return
       }
       user.online = !user.online
       writeDb(db)
-      sendJson(res, 200, { state: sanitizeState(db) })
+      sendJson(req, res, 200, { state: sanitizeState(db) })
       return
     }
 
-    if (req.method === 'POST' && url.pathname === '/api/friend-request') {
+    if (req.method === 'POST' && matchesPath(url.pathname, '/api/friend-request', '/friend-request')) {
       const body = await parseBody(req)
       const exists = db.friendRequests.some(
         (request) =>
@@ -361,24 +415,24 @@ const server = http.createServer(async (req, res) => {
         })
         writeDb(db)
       }
-      sendJson(res, 200, { state: sanitizeState(db) })
+      sendJson(req, res, 200, { state: sanitizeState(db) })
       return
     }
 
-    if (req.method === 'POST' && url.pathname === '/api/friend-request/respond') {
+    if (req.method === 'POST' && matchesPath(url.pathname, '/api/friend-request/respond', '/friend-request/respond')) {
       const body = await parseBody(req)
       const request = db.friendRequests.find((item) => item.id === body.requestId)
       if (!request) {
-        sendJson(res, 404, { error: 'Request not found.' })
+        sendJson(req, res, 404, { error: 'Request not found.' })
         return
       }
       request.status = body.status
       writeDb(db)
-      sendJson(res, 200, { state: sanitizeState(db) })
+      sendJson(req, res, 200, { state: sanitizeState(db) })
       return
     }
 
-    if (req.method === 'POST' && url.pathname === '/api/post') {
+    if (req.method === 'POST' && matchesPath(url.pathname, '/api/post', '/post')) {
       const body = await parseBody(req)
       db.posts.unshift({
         id: createId(),
@@ -388,11 +442,11 @@ const server = http.createServer(async (req, res) => {
         createdAt: new Date().toISOString(),
       })
       writeDb(db)
-      sendJson(res, 200, { state: sanitizeState(db) })
+      sendJson(req, res, 200, { state: sanitizeState(db) })
       return
     }
 
-    if (req.method === 'POST' && url.pathname === '/api/message') {
+    if (req.method === 'POST' && matchesPath(url.pathname, '/api/message', '/message')) {
       const body = await parseBody(req)
       db.messages.push({
         id: createId(),
@@ -402,27 +456,27 @@ const server = http.createServer(async (req, res) => {
         createdAt: new Date().toISOString(),
       })
       writeDb(db)
-      sendJson(res, 200, { state: sanitizeState(db) })
+      sendJson(req, res, 200, { state: sanitizeState(db) })
       return
     }
 
-    if (req.method === 'POST' && url.pathname === '/api/game-room') {
+    if (req.method === 'POST' && matchesPath(url.pathname, '/api/game-room', '/game-room')) {
       const body = await parseBody(req)
       db.gameRooms.unshift(createRoomState(body.hostId, body.guestId, body.type))
       writeDb(db)
-      sendJson(res, 200, { state: sanitizeState(db) })
+      sendJson(req, res, 200, { state: sanitizeState(db) })
       return
     }
 
-    if (req.method === 'POST' && url.pathname === '/api/game-room/tic') {
+    if (req.method === 'POST' && matchesPath(url.pathname, '/api/game-room/tic', '/game-room/tic')) {
       const body = await parseBody(req)
       const room = db.gameRooms.find((item) => item.id === body.roomId)
       if (!room || room.type !== 'tic' || room.status !== 'active') {
-        sendJson(res, 404, { error: 'Room unavailable.' })
+        sendJson(req, res, 404, { error: 'Room unavailable.' })
         return
       }
       if (room.turn !== body.userId || room.board[body.index]) {
-        sendJson(res, 400, { error: 'Invalid move.' })
+        sendJson(req, res, 400, { error: 'Invalid move.' })
         return
       }
 
@@ -434,15 +488,15 @@ const server = http.createServer(async (req, res) => {
       room.resultLabel = winnerId ? 'Winner found' : isDraw ? 'Match drawn' : ''
       room.turn = body.userId === room.hostId ? room.guestId : room.hostId
       writeDb(db)
-      sendJson(res, 200, { state: sanitizeState(db) })
+      sendJson(req, res, 200, { state: sanitizeState(db) })
       return
     }
 
-    if (req.method === 'POST' && url.pathname === '/api/game-room/rps') {
+    if (req.method === 'POST' && matchesPath(url.pathname, '/api/game-room/rps', '/game-room/rps')) {
       const body = await parseBody(req)
       const room = db.gameRooms.find((item) => item.id === body.roomId)
       if (!room || room.type !== 'rps' || room.status !== 'active') {
-        sendJson(res, 404, { error: 'Room unavailable.' })
+        sendJson(req, res, 404, { error: 'Room unavailable.' })
         return
       }
 
@@ -450,7 +504,7 @@ const server = http.createServer(async (req, res) => {
       if (!room.moves[room.hostId] || !room.moves[room.guestId]) {
         room.resultLabel = 'Waiting for other player move.'
         writeDb(db)
-        sendJson(res, 200, { state: sanitizeState(db) })
+        sendJson(req, res, 200, { state: sanitizeState(db) })
         return
       }
 
@@ -466,16 +520,21 @@ const server = http.createServer(async (req, res) => {
       room.status = 'finished'
       room.resultLabel = winnerId ? 'Round completed' : 'Round tied.'
       writeDb(db)
-      sendJson(res, 200, { state: sanitizeState(db) })
+      sendJson(req, res, 200, { state: sanitizeState(db) })
       return
     }
 
-    sendJson(res, 404, { error: 'Not found.' })
+    sendJson(req, res, 404, { error: 'Not found.' })
   } catch (error) {
-    sendJson(res, 500, { error: error.message || 'Server error.' })
+    sendJson(req, res, 500, { error: error.message || 'Server error.' })
   }
-})
+}
 
-server.listen(port, () => {
-  console.log(`ConnectArena server running on http://localhost:${port}`)
-})
+export default handleRequest
+
+if (process.argv[1] === __filename) {
+  const server = http.createServer(handleRequest)
+  server.listen(port, () => {
+    console.log(`ConnectArena server running on http://localhost:${port}`)
+  })
+}
